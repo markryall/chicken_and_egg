@@ -8,6 +8,7 @@ step is already done. There is no second artifact to drift out of sync.
 
   ./runbook.py <file.md>             # step through whatever is not done
   ./runbook.py <file.md> --list      # print the board and exit
+  ./runbook.py <file.md> --check     # unfinished step ids; exit 1 if any
   ./runbook.py <file.md> --ask       # list saved answers
   ./runbook.py <file.md> --ask <id>  # change one answer
   ./runbook.py <file.md> --reset     # forget skips and answers
@@ -643,6 +644,16 @@ def main():
     if "--list" in args:
         draw(title, steps, state, evaluate(steps, state))
         return 0
+
+    if "--check" in args:
+        # Machine-readable, for scripts and CI: one id per unfinished step,
+        # nothing at all when everything passes, exit 1 if any remain. Points a
+        # build at a runbook so documentation cannot rot unnoticed.
+        statuses = evaluate(steps, state)
+        outstanding = [s for s in steps if statuses[s.id] not in (DONE, SKIPPED)]
+        for step in outstanding:
+            print(f"{step.id}\t{statuses[step.id]}\t{step.title}")
+        return 1 if outstanding else 0
 
     while True:
         statuses = evaluate(steps, state)
