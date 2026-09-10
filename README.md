@@ -83,6 +83,16 @@ Answers reach later steps as environment variables named after the id, in both
 the command and its `check` — `id=github-user` becomes `$GITHUB_USER`. Ask
 once, personalise forever.
 
+### Where steps run
+
+In the repo holding the runbook — the nearest parent with a `.git`, `.jj` or
+`.hg`, or the document's own directory when it is not a checkout. A runbook
+can therefore say `./setup-fish.sh` and `brew bundle check --file Brewfile`
+and be right no matter where the machine cloned it, which is the difference
+between a document that describes your laptop and one that describes your
+laptop's file paths. `$RUNBOOK_ROOT` is that directory, for the handful of
+commands that need an absolute path regardless — the target of a symlink, say.
+
 ## Why a check, and not a log of what ran
 
 Every comparable tool records whether *it* performed a step. That's a journal,
@@ -127,11 +137,22 @@ It writes exactly two things — `~/.local/bin/runbook`, and a scratch copy of
 the first-phase runbook under `$TMPDIR`. Everything after that is a step you
 approve one at a time.
 
+One wrinkle worth knowing about, because it bites every `curl | bash`
+installer that then wants to ask you something: piped in, the script *is*
+stdin, and that pipe is drained by the time the runner starts. So the runner
+reopens `/dev/tty` and hands it to its own prompts and to the interactive
+steps it spawns. Without that, every question reads EOF — which is
+indistinguishable from you pressing q, so the runbook appears to abort on the
+first step it wants an answer for.
+
 ## Status
 
 Young, and honest about it. Written in a couple of evenings, tested against two
-real documents on macOS. It has never been run on a genuinely fresh machine by
-someone who isn't its author — which is, admittedly, the only test that counts.
+real documents on macOS, and since run end to end on a fresh Mac — which found
+two things nothing else would have: prompts reading EOF under `curl | bash`,
+and a runbook that had quietly hard-coded where its own repo was cloned. It has
+still never been run by someone who isn't its author, which is the only test
+that really counts.
 
 macOS only for now. Nothing in the runner is Mac-specific; `install.sh` and the
 first-phase runbook very much are.

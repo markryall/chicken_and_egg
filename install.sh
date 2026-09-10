@@ -66,6 +66,18 @@ say "Fetching the first-phase runbook"
 mkdir -p "$WORK"
 curl -fsSL "$RAW/runbooks/new-mac.md" -o "$WORK/new-mac.md"
 
+# Piped into bash, this script *is* stdin, and by now that pipe is drained.
+# The runner asks questions, so hand it the terminal rather than the husk of
+# the pipe — otherwise every prompt reads EOF and the runbook looks like it
+# aborts on the first step. The runner reopens /dev/tty itself as well; this
+# covers the interactive steps it spawns, and says something useful when there
+# is no terminal at all.
+if [ ! -r /dev/tty ]; then
+  warn "No terminal available, so the runner has nothing to ask. Run it yourself:"
+  echo "    $BIN/runbook $WORK/new-mac.md"
+  exit 0
+fi
+
 say "Here we go."
 echo
-exec "$PYTHON" "$BIN/runbook" "$WORK/new-mac.md"
+exec "$PYTHON" "$BIN/runbook" "$WORK/new-mac.md" < /dev/tty

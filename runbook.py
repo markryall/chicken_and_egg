@@ -43,6 +43,16 @@ Answers reach every later command as an environment variable named after the
 id — `id=github-user` becomes `$GITHUB_USER` in both `check` and the body, so a
 runbook is asked once and personalised on every run after that.
 
+Where commands run
+------------------
+
+In the repo holding the document — the nearest parent of the file with a
+`.git`, `.jj` or `.hg` in it, or the file's own directory if it is not a
+checkout. So a runbook says `./setup-fish.sh` and `--file Brewfile`, and stays
+right whether the machine cloned it to ~/code, ~/src or a scratch directory.
+`$RUNBOOK_ROOT` holds that directory for the few commands that need an
+absolute path anyway, such as the target of a symlink.
+
 Why a check rather than a log of what ran
 -----------------------------------------
 
@@ -61,6 +71,10 @@ import subprocess
 import sys
 
 STATE_DIR = os.path.expanduser("~/.local/state/runbook")
+
+# Every command runs here rather than wherever you happened to be standing.
+# Set from the document at startup; see runbook_root.
+ROOT = os.getcwd()
 
 DONE, TODO, SKIPPED, GATED, FAILED = "done", "todo", "skipped", "gated", "failed"
 
@@ -137,6 +151,11 @@ def env_name(step_id):
 
 def answers_env(state):
     env = dict(os.environ)
+    # Commands run with the repo as their working directory, so relative paths
+    # are the natural way to name things in it. $RUNBOOK_ROOT is for the cases
+    # that genuinely need an absolute path anyway — the target of a symlink,
+    # say, which has to keep resolving long after the command has finished.
+    env["RUNBOOK_ROOT"] = ROOT
     for key, value in state.get("answers", {}).items():
         env[env_name(key)] = value
     return env
@@ -177,7 +196,7 @@ class Step:
             return False
         try:
             return subprocess.run(
-                self.check, shell=True, timeout=120, env=env,
+                self.check, shell=True, timeout=120, env=env, cwd=ROOT,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             ).returncode == 0
@@ -275,6 +294,62 @@ def parse(path):
 
 
 # --------------------------------------------------------------------- state
+
+def attach_terminal():
+    """Point stdin at the terminal, whatever the runner was launched from.
+
+    `curl … | bash` leaves the script's stdin on the pipe, and by the time the
+    runner starts that pipe is drained — so every prompt reads EOF, which
+    looks exactly like the operator pressing q. The runbook appears to abort
+    on the first step it wants an answer for.
+
+    dup2 rather than just reassigning sys.stdin, because the interactive steps
+    are the ones that matter most here: `gh auth login` and the Homebrew
+    installer inherit file descriptor 0, and they need the terminal too.
+
+    Returns False when there is no terminal to attach — a cron job or a CI
+    box — which is a thing to say plainly rather than to discover one silent
+    quit at a time.
+    """
+    if sys.stdin.isatty():
+        return True
+    try:
+        fd = os.open("/dev/tty", os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        os.dup2(fd, 0)
+    finally:
+        os.close(fd)
+    sys.stdin = os.fdopen(0)
+    return sys.stdin.isatty()
+
+
+def runbook_root(path):
+    """Where the document's commands should run: the repo holding it.
+
+    A runbook is written from the point of view of its own checkout —
+    `./setup-fish.sh`, `--file Brewfile` — so which directory the machine
+    happened to clone it into must not leak into the document. Walk up from
+    the file looking for a checkout, and settle for the file's own directory
+    when there is not one, which is the case for a first-phase runbook fetched
+    to a scratch directory rather than cloned.
+
+    Deliberately not `git rev-parse`: this runs before the machine
+    necessarily has a working git, and stat-ing a few parents is cheaper than
+    a subprocess anyway.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    candidate = directory
+    while True:
+        if any(os.path.exists(os.path.join(candidate, marker))
+               for marker in (".git", ".jj", ".hg")):
+            return candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            return directory
+        candidate = parent
+
 
 def state_path(path):
     slug = re.sub(r"[^a-z0-9]+", "-", os.path.basename(path).lower()).strip("-")
@@ -577,7 +652,7 @@ def handle(step, path, state):
         # output becomes an answer, so paths and ids can be discovered at run
         # time rather than hard-coded into the document.
         result = subprocess.run(["/bin/bash", "-c", step.body], env=env,
-                                stdout=subprocess.PIPE, text=True)
+                                cwd=ROOT, stdout=subprocess.PIPE, text=True)
         code = result.returncode
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
         value = [ln for ln in result.stdout.splitlines() if ln.strip()]
@@ -588,7 +663,8 @@ def handle(step, path, state):
                         f"{state['answers'][step.capture]}", "green"))
             return True
     else:
-        code = subprocess.run(["/bin/bash", "-c", step.body], env=env).returncode
+        code = subprocess.run(["/bin/bash", "-c", step.body], env=env,
+                              cwd=ROOT).returncode
 
     if code == 0 or step.is_done(env):
         record.pop("failed", None)
@@ -615,6 +691,11 @@ def main():
         print(f"no such runbook: {path}")
         return 1
 
+    # Steps run in the repo holding the document, not in whatever directory
+    # the runner was invoked from.
+    global ROOT
+    ROOT = runbook_root(path)
+
     if "--reset" in args:
         save_state(path, {"steps": {}, "answers": {}})
         print("state cleared, answers forgotten")
@@ -629,6 +710,9 @@ def main():
             for key, value in sorted(state["answers"].items()):
                 print(f"  {env_name(key)}={value}")
             return 0
+        if not attach_terminal():
+            print("--ask needs a terminal to read the new answer from")
+            return 1
         for step in steps:
             if step.kind == "ask" and step.id in wanted:
                 state["answers"].pop(step.id, None)
@@ -654,6 +738,14 @@ def main():
         for step in outstanding:
             print(f"{step.id}\t{statuses[step.id]}\t{step.title}")
         return 1 if outstanding else 0
+
+    # --list and --check are the modes that make sense without a person; from
+    # here every step is offered to one.
+    if not attach_terminal():
+        print("Nothing to read answers from — stdin is not a terminal and")
+        print("/dev/tty could not be opened. --list and --check work without")
+        print("one; stepping through does not.")
+        return 1
 
     while True:
         statuses = evaluate(steps, state)
